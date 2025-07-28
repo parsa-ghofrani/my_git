@@ -67,30 +67,30 @@ def repo_path(repo, *path):
     """Compute path under repo's gitdir."""
     return os.path.join(repo.gitdir, *path) 
 
-# def repo_file(repo, *path, mkdir=False):
-#     """Same as repo_path, but create dirname(*path) if absent.  For
-# example, repo_file(r, \"refs\", \"remotes\", \"origin\", \"HEAD\") will create
-# .git/refs/remotes/origin."""
+def repo_file(repo, *path, mkdir=False):
+    """Same as repo_path, but create dirname(*path) if absent.  For
+example, repo_file(r, \"refs\", \"remotes\", \"origin\", \"HEAD\") will create
+.git/refs/remotes/origin."""
 
-#     if repo_dir(repo, *path[:-1], mkdir=mkdir):
-#         return repo_path(repo, *path)
+    if repo_dir(repo, *path[:-1], mkdir=mkdir):
+        return repo_path(repo, *path)
     
-# def repo_dir(repo, *path, mkdir=False):
-#     """Same as repo_path, but mkdir *path if absent if mkdir."""
+def repo_dir(repo, *path, mkdir=False):
+    """Same as repo_path, but mkdir *path if absent if mkdir."""
 
-#     path = repo_path(repo, *path)
+    path = repo_path(repo, *path)
 
-#     if os.path.exists(path):
-#         if (os.path.isdir(path)):
-#             return path
-#         else:
-#             raise Exception(f"Not a directory {path}")
+    if os.path.exists(path):
+        if (os.path.isdir(path)):
+            return path
+        else:
+            raise Exception(f"Not a directory {path}")
 
-#     if mkdir:
-#         os.makedirs(path)
-#         return path
-#     else:
-#         return None
+    if mkdir:
+        os.makedirs(path)
+        return path
+    else:
+        return None
     
 def repo_path_safe(repo, *path, mkdir=False, is_file=False):
     """
@@ -174,5 +174,286 @@ def repo_find(path='.', required=True):
             return None
         
     return repo_find(parent, required)
+
+
+# now we creat an object!
+
+class GitObject(object):
+
+    def __init__(self, data=None):
+        if data != None:
+            self.deserialize(data)
+
+        else:
+            pass
+
+    def serialize(self, repo):
+        """This function MUST be implemented by subclasses.
+
+It must read the object's contents from self.data, a byte string, and
+do whatever it takes to convert it into a meaningful representation.
+What exactly that means depend on each subclass."""
+
+        raise Exception("Unimplemented!")
+
+    def deserialize(self, data):
+        raise Exception("Unimplemented!")
+
+
+def object_read(repo, sha):
+    """Read object sha from Git repository repo.  Return a
+    GitObject whose exact type depends on the object."""
+
+    path = repo_file(repo,"objects",sha[0:2], sha[2:])
+    if not os.path.isfile(path):
+        return None
+    
+    with open (path, "rb") as f:
+        raw = zlib.decompress(f.read())
+
+        # Read object file:
+        x = raw.find(b' ')
+        fmt = raw[0:x]
+        # Read and validate object size
+        y = raw.find(b'\x00', x)
+        size  = int(raw[x:y].decode("ascii"))
+        if size != len(raw)-y-1:
+            raise Exception(f"Malformed object {sha}: bad length")
+
+        # pick the suitable constructor:
+        match fmt:
+            case b'commit' : c=GitCommit
+            case b'tree'   : c=GitTree
+            case b'tag'    : c=GitTag
+            case b'blob'   : c=GitBlob
+            case _:
+                raise Exception(f"Unknown type {fmt.decode("ascii")} for object {sha}")
+
+        # Call constructor and return object
+        return c(raw[y+1:])
+    
+def object_write(obj: GitObject, repo=None):
+    data = obj.serialize()
+    result = obj.ftm + b' ' + str(len(data)).encode() + b'\x00' + data
+    sha = hashlib.sha1(result).hexdigest()
+
+    if repo:
+        path=repo_file(repo,"objects", sha[0:2], sha[2:], mkdir=True)
+        if not os.path.exists(path):
+            with open(path,'wb') as f:
+                #Compress it and Write:
+                f.write(zlib.compress(result))
+    
+    return sha
+
+class GitBlob(GitObject):
+    ftm=b'blob'
+    def serialize(self):
+        return self.blobdata
+    def deserialize(self, data):
+        self.blobdata = data
+
+argsp = argsubparsers.add_parser("cat-file",
+                                 help="Provide content of repository objects")
+
+argsp.add_argument("type",
+                   metavar="type",
+                   choices=["blob", "commit", "tag", "tree"],
+                   help="Specify the type")
+
+argsp.add_argument("object",
+                   metavar="object",
+                   help="The object to display")
+
+def cmd_cat_file(args):
+    repo = repo_find()
+    cat_file(repo, args.object, fmt=args.type.encode())
+
+def cat_file(repo, obj, fmt=None):
+    obj = object_read(repo,object_find(repo,obj,fmt=fmt))
+
+    sys.stdout.buffer.write(obj.serialize)
+
+def object_find(repo, name, fmt=None, follow=True):
+    return name
+
+argsp = argsubparsers.add_parser(
+    "hash-object",
+    help="Compute object ID and optionally creates a blob from a file")
+
+argsp.add_argument("-t",
+                   metavar="type",
+                   dest="type",
+                   choices=["blob", "commit", "tag", "tree"],
+                   default="blob",
+                   help="Specify the type")
+
+argsp.add_argument("-w",
+                   dest="write",
+                   action="store_true",
+                   help="Actually write the object into the database")
+
+argsp.add_argument("path",
+                   help="Read object from <file>")
+
+def cmd_hash_object(args):
+    if args.write:
+        repo = repo_find()
+    else:
+        repo = None
+
+    with open(args.path, 'rb') as fd:
+        sha = object_hash(fd, args.type.encode(), repo)
+        print(sha)
+
+def object_hash(fd, fmt, repo=None):
+    """ Hash object, writing it to repo if provided."""
+    data = fd.read()
+
+    # choose constructor according to fmt argument
+    match fmt:
+        case b'commit' : obj=GitCommit(data)
+        case b'tree'   : obj=GitTree(data)
+        case b'tag'    : obj=GitTag(data)
+        case b'blob'   : obj=GitBlob(data)
+        case _: raise Exception(f"Unknown type {fmt}!")
+
+    return object_write(obj, repo)
+
+def kvlm_parse(raw, start=0, dct=None):
+    if not dct:
+        dct=dict()
+    
+    # we want to recursivly read a key/value pair and call it self back with new positions!
+    # at first we need to know where we are, at a keyword? or at a messageQ?
+    # the format I am using is RFC 2822 you can find it here: https://www.ietf.org/rfc/rfc2822.txt
+    # lines of information for a given part are seperated with a space charachter!
+
+    spc = raw.find(b' ', start)
+    nl = raw.find(b'\n', start)
+
+    # if there is a space before newline, we have a keyword. Otherwise it's the final message, which we just read to the end of the file
+    
+    # Base case
+    # =========
+    # If newline appears first (or there's no space at all, in which
+    # case find returns -1), we assume a blank line.  A blank line
+    # means the remainder of the data is the message.  We store it in
+    # the dictionary, with None as the key, and return.
+    
+    
+    if (spc<0) or (nl<spc):
+        assert nl == start
+        dct[None] = raw[start+1:]
+        return dct
+    
+    # Recursive case
+    # ==============
+    # we read a key-value pair and recurse for the next.
+    key = raw[start:spc]
+
+    # Find the end of the value.  Continuation lines begin with a space, so we loop until we find a "\n" not followed by a space.
+    end = start
+    while True:
+        end = raw.find(b'\n', end+1)
+        if raw[end+1] != ord(' '): break
+
+    # now we should grab the value and delete the spcae (in the start of the line) to have access to the full data
+    value = raw[spc+1:end].replace(b'\n ', b'\n')
+    if key in dct:
+        if type(dct[key]) == list:
+            dct[key].append(value)
+        else:
+            dct[key] = [ dct[key], value ]
+    else:
+        dct[key] = value
+
+    return kvlm_parse(raw, start=end+1, dct=dct)
+
+# Key-Value List with Message
+def kvlm_serialize(kvlm):
+    """write all fields first, then a newline, the message, and a final newline"""
+    ret = b''
+
+    for k in kvlm.keys():
+        #skip the message
+        if k == None: continue
+        val = kvlm[k]
+        # Normalize it to a list
+        if type(val) != list:
+            val = [ val ]
+
+        for v in val:
+            ret += k + b' ' + (v.replace(b'\n', b'\n ')) + b'\n'
+
+        ret += b'\n' + kvlm[None]
+
+    return ret
+
+
+class GitCommit(GitObject):
+    fmt=b'commit'
+
+    def deserialize(self, data):
+        self.kvlm = kvlm_parse(data)
+
+    def serialize(self):
+        return kvlm_serialize(self.kvlm)
+    
+    def init(self):
+        self.kvlm = dict()
+
+
+argsp = argsubparsers.add_parser("log", help="Display history of a given commit.")
+argsp.add_argument(
+    "commit",
+    default="HEAD",
+    nargs="?",
+    help="Commit to start at."
+)
+
+
+# usage of log is aas below:
+# wyag log e03158242ecab460f31b0d6ae1642880577ccbe8 > log.dot dot -O -Tpdf log.dot
+
+def cmd_log(args):
+    repo = repo_find()
+
+    print("digraph wyaglog{")
+    print("  node[shape=rect]")
+    log_graphviz(repo, object_find(repo, args.commit), set())
+    print("}")
+
+def log_graphviz(repo, sha, seen):
+    if sha in seen:
+        return
+    seen.add(sha)
+
+    commit = object_read(repo,sha)
+    message = commit.kvlm[None].decode("utf8").strip()
+    message = message.replace("\\","\\\\")
+    message = message.replace("\"", "\\\"")
+
+    # Keep only the first line
+    if "\n" in message:
+        message = message[:message.index("\n")]
+    print(f"  c_{sha} [label=\"{sha[0:7]}: {message}\"]")
+    assert commit.fmt==b'commit'
+
+    if not b'parent' in commit.kvlm.keys():
+        # Base case: the initial commit.
+        return
+
+    parents = commit.kvlm[b'parent']
+
+    if type(parents) != list:
+        parents = [ parents ]
+
+    for p in parents:
+        p = p.decode("ascii")
+        print (f"  c_{sha} -> c_{p};")
+        log_graphviz(repo, p, seen)
+
+
 
 
